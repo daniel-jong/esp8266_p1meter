@@ -81,7 +81,7 @@ bool mqtt_reconnect()
         Serial.printf("MQTT connection attempt %d / %d ...\n", MQTT_RECONNECT_RETRIES, MQTT_MAX_RECONNECT_TRIES);
 
         // * Attempt to connect
-        if (mqtt_client.connect(HOSTNAME, MQTT_USER, MQTT_PASS))
+        if (mqtt_client.connect(MQTT_HOST, MQTT_USER, MQTT_PASS))
         {
             Serial.println(F("MQTT connected!"));
 
