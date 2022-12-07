@@ -373,6 +373,14 @@ bool decode_telegram(int len)
     {
         GAS_METER_M3 = getValue(telegram, len, '(', '*');
     }
+	
+	
+    // 0-1:24.2.3(150531200000S)(00811.923*m3)
+    // 0-1:24.2.3 = Gas on Belgian meters
+    if (strncmp(telegram, "0-1:24.2.3", strlen("0-1:24.2.3")) == 0)
+    {
+        GAS_METER_M3 = getValue(telegram, len, '(', '*');
+    }
 
     // 0-0:96.14.0(0001)
     // 0-0:96.14.0 = Actual Tarif
