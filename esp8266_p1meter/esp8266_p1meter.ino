@@ -129,10 +129,24 @@ void send_metric(String name, long metric)
 
 void send_data_to_broker()
 {
-    send_metric("consumption_low_tarif", CONSUMPTION_LOW_TARIF);
-    send_metric("consumption_high_tarif", CONSUMPTION_HIGH_TARIF);
-    send_metric("returndelivery_low_tarif", RETURNDELIVERY_LOW_TARIF);
-    send_metric("returndelivery_high_tarif", RETURNDELIVERY_HIGH_TARIF);
+    if (FLIPHIGHLOWTARIF) {
+        send_metric("consumption_low_tarif", CONSUMPTION_HIGH_TARIF);
+        send_metric("consumption_high_tarif", CONSUMPTION_LOW_TARIF);
+        send_metric("returndelivery_low_tarif", RETURNDELIVERY_HIGH_TARIF);
+        send_metric("returndelivery_high_tarif", RETURNDELIVERY_LOW_TARIF);
+        if (ACTUAL_TARIF == 1)
+        {
+            ACTUAL_TARIF = 2;
+        } else {
+            ACTUAL_TARIF = 1;
+        }
+    } else {
+        send_metric("consumption_low_tarif", CONSUMPTION_LOW_TARIF);
+        send_metric("consumption_high_tarif", CONSUMPTION_HIGH_TARIF);
+        send_metric("returndelivery_low_tarif", RETURNDELIVERY_LOW_TARIF);
+        send_metric("returndelivery_high_tarif", RETURNDELIVERY_HIGH_TARIF);
+    }
+
     send_metric("actual_consumption", ACTUAL_CONSUMPTION);
     send_metric("actual_returndelivery", ACTUAL_RETURNDELIVERY);
 
@@ -147,6 +161,7 @@ void send_data_to_broker()
     send_metric("l3_voltage", L3_VOLTAGE);
     
     send_metric("gas_meter_m3", GAS_METER_M3);
+    send_metric("actual_consumption_gas_m3", ACTUAL_CONSUMPTION_GAS_M3);
 
     send_metric("actual_tarif_group", ACTUAL_TARIF);
     send_metric("short_power_outages", SHORT_POWER_OUTAGES);
@@ -444,6 +459,14 @@ void processLine(int len) {
 
     bool result = decode_telegram(len + 1);
     if (result) {
+        if (LAST_GAS_METER_M3 > 0) {
+            if (GAS_METER_M3 > LAST_GAS_METER_M3) {
+                ACTUAL_CONSUMPTION_GAS_M3 = GAS_METER_M3 - LAST_GAS_METER_M3;
+            }
+        } else {
+            ACTUAL_CONSUMPTION_GAS_M3 = 0;
+        }
+        LAST_GAS_METER_M3 = GAS_METER_M3;
         send_data_to_broker();
         LAST_UPDATE_SENT = millis();
     }

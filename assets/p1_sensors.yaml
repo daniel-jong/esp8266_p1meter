@@ -145,6 +145,15 @@
   value_template: "{{ value|float / 1000 }}"
 
 - platform: mqtt
+  name: P1 Actual Gas Consumption
+  unique_id: 'sensor.p1_actual_gas_consumption'
+  device_class: gas
+  state_class: measurement
+  unit_of_measurement: 'm³'
+  state_topic: "sensors/power/p1meter/actual_consumption_gas_m3"
+  value_template: "{{ value|float / 1000 }}"
+
+- platform: mqtt
   name: P1 Actual Tariff Group
   unique_id: 'sensor.p1_actual_tariff_group'
   state_topic: "sensors/power/p1meter/actual_tarif_group"
