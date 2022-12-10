@@ -36,3 +36,4 @@
 
 # PlatformIo
 .pio/
+.DS_Store
