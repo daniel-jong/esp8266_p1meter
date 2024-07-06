@@ -9,7 +9,6 @@ mqtt:
       state_topic: "sensors/power/p1meter/consumption_low_tarif"
       value_template: "{{ value|float / 1000 }}"
 
-
     - name: P1 Consumption High Tariff
       unique_id: 'sensor.p1_consumption_high_tariff'
       device_class: energy
@@ -155,3 +154,23 @@ mqtt:
     - name: P1 Short Power Peaks
       unique_id: 'sensor.p1_short_power_peaks'
       state_topic: "sensors/power/p1meter/short_power_peaks"
+  
+    - name: P1 Actual Average 15m Peak
+      unit_of_measurement: 'W'
+      device_class: power
+      state_class: measurement
+      state_topic: "sensors/power/p1meter/actual_average_15m_peak"
+      
+    - name: P1 Thismonth Average 15m Peak
+      unit_of_measurement: 'W'
+      device_class: power
+      state_class: measurement
+      state_topic: "sensors/power/p1meter/thismonth_max_15m_peak"
+      
+    - name: P1 Last13months Average 15m Peak
+      unit_of_measurement: 'W'
+      state_topic: "sensors/power/p1meter/last13months_average_15m_peak"
+
+    - name: P1 Last13months Average 15m Peak
+      unit_of_measurement: 'W'
+      state_topic: "sensors/power/p1meter/last13months_peaks_json"

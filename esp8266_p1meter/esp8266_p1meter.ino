@@ -8,9 +8,18 @@
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include <PubSubClient.h>
+#include <DoubleResetDetector.h>
+#include <string>
+#include <vector>
+#include <ArduinoJson.h>
+
+using namespace std;
 
 // * Include settings
 #include "settings.h"
+
+// * Initiate Double resetDetector
+DoubleResetDetector drd(DRD_TIMEOUT, DRD_ADDRESS);
 
 // * Initiate led blinker library
 Ticker ticker;
@@ -46,8 +55,8 @@ void configModeCallback(WiFiManager *myWiFiManager)
 void tick()
 {
     // * Toggle state
-    int state = digitalRead(LED_BUILTIN);    // * Get the current state of GPIO1 pin
-    digitalWrite(LED_BUILTIN, !state);       // * Set pin to the opposite state
+    int state = digitalRead(LED_BUILTIN); // * Get the current state of GPIO1 pin
+    digitalWrite(LED_BUILTIN, !state);    // * Set pin to the opposite state
 }
 
 // **********************************
@@ -57,15 +66,21 @@ void tick()
 // * Send a message to a broker topic
 void send_mqtt_message(const char *topic, char *payload)
 {
-    Serial.printf("MQTT Outgoing on %s: ", topic);
-    Serial.println(payload);
-
     bool result = mqtt_client.publish(topic, payload, false);
 
     if (!result)
     {
         Serial.printf("MQTT publish to topic %s failed\n", topic);
     }
+}
+
+// * send a Json message to a broker topic
+void send_mqtt_message(const char *topic, StaticJsonDocument<256> doc)
+{
+    char buffer[256]; //max buffer of PubSubClient is 256 byte.
+    size_t n = serializeJson(doc, buffer);
+    mqtt_client.publish(topic, buffer, n);
+    doc.clear(); // clear memory for the Json Document in this method.
 }
 
 // * Reconnect to MQTT server and subscribe to in and out topics
@@ -115,11 +130,6 @@ bool mqtt_reconnect()
 
 void send_metric(String name, long metric)
 {
-    Serial.print(F("Sending metric to broker: "));
-    Serial.print(name);
-    Serial.print(F("="));
-    Serial.println(metric);
-
     char output[10];
     ltoa(metric, output, sizeof(output));
 
@@ -145,7 +155,7 @@ void send_data_to_broker()
     send_metric("l1_voltage", L1_VOLTAGE);
     send_metric("l2_voltage", L2_VOLTAGE);
     send_metric("l3_voltage", L3_VOLTAGE);
-    
+
     send_metric("gas_meter_m3", GAS_METER_M3);
 
     send_metric("actual_tarif_group", ACTUAL_TARIF);
@@ -153,6 +163,12 @@ void send_data_to_broker()
     send_metric("long_power_outages", LONG_POWER_OUTAGES);
     send_metric("short_power_drops", SHORT_POWER_DROPS);
     send_metric("short_power_peaks", SHORT_POWER_PEAKS);
+
+    send_metric("actual_average_15m_peak", mActualAverage15mPeak);
+    send_metric("thismonth_max_15m_peak", mMax15mPeakThisMonth);
+    send_metric("last13months_average_15m_peak", mAverage15mPeakLast13months);
+    send_mqtt_message((String(MQTT_ROOT_TOPIC) + "/" + "last13months_peaks_json").c_str(), Last13MonthsPeaks_json); // bypassed send_metric() for Json message.
+    Last13MonthsPeaks_json.clear(); // clear memory for the GLOBAL JsonDocument.
 }
 
 // **********************************
@@ -161,26 +177,27 @@ void send_data_to_broker()
 
 unsigned int CRC16(unsigned int crc, unsigned char *buf, int len)
 {
-	for (int pos = 0; pos < len; pos++)
+    for (int pos = 0; pos < len; pos++)
     {
-		crc ^= (unsigned int)buf[pos];    // * XOR byte into least sig. byte of crc
-                                          // * Loop over each bit
-        for (int i = 8; i != 0; i--)
+        crc ^= (unsigned int)buf[pos]; // * XOR byte into least sig. byte of crc
+
+        for (int i = 8; i != 0; i--) // * Loop over each bit
         {
             // * If the LSB is set
             if ((crc & 0x0001) != 0)
             {
                 // * Shift right and XOR 0xA001
                 crc >>= 1;
-				crc ^= 0xA001;
-			}
+                crc ^= 0xA001;
+                // crc ^= 0x8005;
+            }
             // * Else LSB is not set
             else
                 // * Just shift right
                 crc >>= 1;
-		}
-	}
-	return crc;
+        }
+    }
+    return crc;
 }
 
 bool isNumber(char *res, int len)
@@ -203,7 +220,7 @@ int FindCharInArrayRev(char array[], char c, int len)
     return -1;
 }
 
-long getValue(char *buffer, int maxlen, char startchar, char endchar)
+long getValue(char *buffer, int maxlen, char startchar, char endchar) // should have more than 4 chars.
 {
     int s = FindCharInArrayRev(buffer, startchar, maxlen - 2);
     int l = FindCharInArrayRev(buffer, endchar, maxlen - 2) - s - 1;
@@ -228,32 +245,78 @@ long getValue(char *buffer, int maxlen, char startchar, char endchar)
     return 0;
 }
 
+char *stringToCharArray(string s)
+{
+    const int length = s.length();
+    char *char_array = new char[length + 1];
+    return strcpy(char_array, s.c_str());
+}
+
+// returns an array of values '(02.314)'
+vector<string> parseStringIntoVectorArray(char *input)
+{
+    string s(input);
+
+    vector<string> result;
+    size_t start = s.find("(");
+    while (start != string::npos)
+    {
+        size_t end = s.find(")", start + 1);
+        if (end == string::npos)
+        {
+            break;
+        }
+        // result.push_back(s.substr(start + 1, end - start - 1));
+        result.push_back(s.substr(start, end - start + 1)); // keep the emphases in the result. (12)
+        start = s.find("(", end + 1);
+    }
+    return result;
+}
+
 bool decode_telegram(int len)
 {
     int startChar = FindCharInArrayRev(telegram, '/', len);
     int endChar = FindCharInArrayRev(telegram, '!', len);
     bool validCRCFound = false;
 
-    for (int cnt = 0; cnt < len; cnt++) {
+    // debug
+    // Serial.printf("\nstartchar = %d; endchar = %d; \n", startChar, endChar);
+
+    Serial.print("telegram = __");
+    for (int cnt = 0; cnt < len; cnt++)
+    {
         Serial.print(telegram[cnt]);
     }
-    Serial.print("\n");
+    // Serial.print("__\n");
 
     if (startChar >= 0)
     {
+        // debug
+        // Serial.println("Branch 1");
+
         // * Start found. Reset CRC calculation
-        currentCRC = CRC16(0x0000,(unsigned char *) telegram+startChar, len-startChar);
+        currentCRC = CRC16(0x0000, (unsigned char *)telegram + startChar, len - startChar);
     }
     else if (endChar >= 0)
     {
+        // debug
+        Serial.println("Branch 2");
+
         // * Add to crc calc
-        currentCRC = CRC16(currentCRC,(unsigned char*)telegram+endChar, 1);
+        currentCRC = CRC16(currentCRC, (unsigned char *)telegram + endChar, 1);
 
         char messageCRC[5];
         strncpy(messageCRC, telegram + endChar + 1, 4);
 
-        messageCRC[4] = 0;   // * Thanks to HarmOtten (issue 5)
-        validCRCFound = (strtol(messageCRC, NULL, 16) == currentCRC);
+        messageCRC[4] = 0; // * Thanks to HarmOtten (issue 5)
+
+        // debug
+        Serial.printf("\nmessageCRC = %s", messageCRC);
+
+        validCRCFound = ((unsigned int)strtol(messageCRC, NULL, 16) == currentCRC);
+
+        // debug
+        Serial.printf("\ncurrentCRC = %d", currentCRC);
 
         if (validCRCFound)
             Serial.println(F("CRC Valid!"));
@@ -264,50 +327,58 @@ bool decode_telegram(int len)
     }
     else
     {
-        currentCRC = CRC16(currentCRC, (unsigned char*) telegram, len);
+        // debug
+        // Serial.println("Branch 3");
+
+        currentCRC = CRC16(currentCRC, (unsigned char *)telegram, len);
     }
 
+    // debug
+    // Serial.printf("\ncurrentCRC = %d", currentCRC);
+
     // 1-0:1.8.1(000992.992*kWh)
-    // 1-0:1.8.1 = Elektra verbruik laag tarief (DSMR v4.0)
+    // 1-0:1.8.1 = Elektra verbruik DAG  tarief (DSMR v4.0)
     if (strncmp(telegram, "1-0:1.8.1", strlen("1-0:1.8.1")) == 0)
+    {
+        CONSUMPTION_HIGH_TARIF = getValue(telegram, len, '(', '*');
+    }
+
+    // 1-0:1.8.2(000560.157*kWh)
+    // 1-0:1.8.2 = Elektra verbruik NACHT tarief (DSMR v4.0)
+    if (strncmp(telegram, "1-0:1.8.2", strlen("1-0:1.8.2")) == 0)
     {
         CONSUMPTION_LOW_TARIF = getValue(telegram, len, '(', '*');
     }
 
-    // 1-0:1.8.2(000560.157*kWh)
-    // 1-0:1.8.2 = Elektra verbruik hoog tarief (DSMR v4.0)
-    if (strncmp(telegram, "1-0:1.8.2", strlen("1-0:1.8.2")) == 0)
-    {
-        CONSUMPTION_HIGH_TARIF = getValue(telegram, len, '(', '*');
-    }
-	
     // 1-0:2.8.1(000560.157*kWh)
-    // 1-0:2.8.1 = Elektra teruglevering laag tarief (DSMR v4.0)
+    // 1-0:2.8.1 = Elektra opbrengst dagtarief (Fluvius) - Totale injectie van energie in kWh dagtarief
     if (strncmp(telegram, "1-0:2.8.1", strlen("1-0:2.8.1")) == 0)
-    {
-        RETURNDELIVERY_LOW_TARIF = getValue(telegram, len, '(', '*');
-    }
-
-    // 1-0:2.8.2(000560.157*kWh)
-    // 1-0:2.8.2 = Elektra teruglevering hoog tarief (DSMR v4.0)
-    if (strncmp(telegram, "1-0:2.8.2", strlen("1-0:2.8.2")) == 0)
     {
         RETURNDELIVERY_HIGH_TARIF = getValue(telegram, len, '(', '*');
     }
 
-    // 1-0:1.7.0(00.424*kW) Actueel verbruik
+    // 1-0:2.8.2(000560.157*kWh)
+    // 1-0:2.8.2 = Elektra opbrengst nachttarief (Fluvius) - Totale injectie van energie in kWh nachttarief
+    if (strncmp(telegram, "1-0:2.8.2", strlen("1-0:2.8.2")) == 0)
+    {
+        RETURNDELIVERY_LOW_TARIF = getValue(telegram, len, '(', '*');
+    }
+
+    // 1-0:1.7.0(00.424*kW) Actueel verbruik (Fluvius) - Afgenomen ogenblikkelijk vermogen in kW
     // 1-0:1.7.x = Electricity consumption actual usage (DSMR v4.0)
     if (strncmp(telegram, "1-0:1.7.0", strlen("1-0:1.7.0")) == 0)
     {
         ACTUAL_CONSUMPTION = getValue(telegram, len, '(', '*');
     }
 
-    // 1-0:2.7.0(00.000*kW) Actuele teruglevering (-P) in 1 Watt resolution
+    // 1-0:2.7.0(00.000*kW) Actuele teruglevering (Fluvius) - Geïnjecteerd ogenblikkelijk vermogen in kW
     if (strncmp(telegram, "1-0:2.7.0", strlen("1-0:2.7.0")) == 0)
     {
         ACTUAL_RETURNDELIVERY = getValue(telegram, len, '(', '*');
     }
 
+    // undocumented --> remove
+    /*
     // 1-0:21.7.0(00.378*kW)
     // 1-0:21.7.0 = Instantaan vermogen Elektriciteit levering L1
     if (strncmp(telegram, "1-0:21.7.0", strlen("1-0:21.7.0")) == 0)
@@ -328,21 +399,21 @@ bool decode_telegram(int len)
     {
         L3_INSTANT_POWER_USAGE = getValue(telegram, len, '(', '*');
     }
-
+*/
     // 1-0:31.7.0(002*A)
-    // 1-0:31.7.0 = Instantane stroom Elektriciteit L1
+    // 1-0:31.7.0 = Instantant stroom Elektriciteit L1
     if (strncmp(telegram, "1-0:31.7.0", strlen("1-0:31.7.0")) == 0)
     {
         L1_INSTANT_POWER_CURRENT = getValue(telegram, len, '(', '*');
     }
     // 1-0:51.7.0(002*A)
-    // 1-0:51.7.0 = Instantane stroom Elektriciteit L2
+    // 1-0:51.7.0 = Instantant stroom Elektriciteit L2
     if (strncmp(telegram, "1-0:51.7.0", strlen("1-0:51.7.0")) == 0)
     {
         L2_INSTANT_POWER_CURRENT = getValue(telegram, len, '(', '*');
     }
     // 1-0:71.7.0(002*A)
-    // 1-0:71.7.0 = Instantane stroom Elektriciteit L3
+    // 1-0:71.7.0 = Instantant stroom Elektriciteit L3
     if (strncmp(telegram, "1-0:71.7.0", strlen("1-0:71.7.0")) == 0)
     {
         L3_INSTANT_POWER_CURRENT = getValue(telegram, len, '(', '*');
@@ -359,7 +430,7 @@ bool decode_telegram(int len)
     if (strncmp(telegram, "1-0:52.7.0", strlen("1-0:52.7.0")) == 0)
     {
         L2_VOLTAGE = getValue(telegram, len, '(', '*');
-    }   
+    }
     // 1-0:72.7.0(232.0*V)
     // 1-0:72.7.0 = Voltage L3
     if (strncmp(telegram, "1-0:72.7.0", strlen("1-0:72.7.0")) == 0)
@@ -367,9 +438,9 @@ bool decode_telegram(int len)
         L3_VOLTAGE = getValue(telegram, len, '(', '*');
     }
 
-    // 0-1:24.2.1(150531200000S)(00811.923*m3)
-    // 0-1:24.2.1 = Gas (DSMR v4.0) on Kaifa MA105 meter
-    if (strncmp(telegram, "0-1:24.2.1", strlen("0-1:24.2.1")) == 0)
+    // 0-1:24.2.3(150531200000S)(00811.923*m3)
+    // 0-1:24.2.3 = Gas (DSMR v5.0 - fluvius)
+    if (strncmp(telegram, "0-1:24.2.3", strlen("0-1:24.2.3")) == 0)
     {
         GAS_METER_M3 = getValue(telegram, len, '(', '*');
     }
@@ -409,33 +480,114 @@ bool decode_telegram(int len)
         SHORT_POWER_PEAKS = getValue(telegram, len, '(', ')');
     }
 
+#pragma region UPDATE 1.7.1 PEAK TARRIFF
+
+    // 1-0:1.4.0(02.351*kW)
+    // 1-0:1.4.0 = quart_hourly_current_average_peak_consumption kW - Current rolling avg of the last 15 minutes
+    if (strncmp(telegram, "1-0:1.4.0", strlen("1-0:1.4.0")) == 0)
+        mActualAverage15mPeak = getValue(telegram, len, '(', '*');
+
+    // 1-0:1.6.0(200509134558S)(02.589*kW)
+    // 1-0:1.6.0 = quart_hourly_max_peak_this_month kW
+    if (strncmp(telegram, "1-0:1.6.0", strlen("1-0:1.6.0")) == 0)
+        mMax15mPeakThisMonth = getValue(telegram, len, '(', '*');
+
+    // 0-0:98.1.0 = quart_hourly_peak_consumption_last_13months
+    // 0-0:98.1.0(3)(1-0:1.6.0)(1-0:1.6.0)(200501000000S)(200423192538S)(03.695*kW)(200401000000S)(200305122139S)(05.980*kW)(200301000000S)(200210035421W)(04.318*kW)
+    /*
+     * Line format:
+        'ID (Count) (ID) (ID) (TST) (TST) (Mv1*U1)'
+         1  2       3    4    5     6     7
+        1) OBIS Reduced ID-code
+        2) Amount of values in the response
+        3) ID of the source
+        4) ^^
+        5) Time Stamp (TST) of the month
+        6) Time Stamp (TST) when the max demand occured
+        6) Measurement value 1 (most recent entry of buffer attribute without unit)
+        7) Unit of measurement values (Unit of capture objects attribute)
+    */
+    if (strncmp(telegram, "0-0:98.1.0", strlen("0-0:98.1.0")) == 0)
+    {
+        vector<string> output = parseStringIntoVectorArray(telegram); // parse telegram into array of strings based on the parentheses '(' ')'
+
+        unsigned long count = stol(output[0].substr(1, output[0].size() - 2));
+        mAverage15mPeakLast13months = count;
+        vector<long> valuesArray;
+
+        // create JsonObject from values telegram
+        Last13MonthsPeaks_json["count"] = count;
+        Last13MonthsPeaks_json["unit"] = "W";
+        JsonArray peakvalues = Last13MonthsPeaks_json.createNestedArray("values");
+
+        for (unsigned int i = 3; i < output.size(); i += 3)
+        {
+            //to filter only the VALUES of the last 12months, I need to loop through the values starting from i=3 and only take the 3th value.
+            // '(Count) (ID) (ID) (TST) (TST) (Mv1*U1) (TST) (TST) (Mv2*U2)'
+            //  0       1    2    3     4     5         6     7    8       ..... 41 (for 12months)
+            valuesArray.push_back(getValue(stringToCharArray(output[i + 2]), output[i + 2].size(), '(', '*')); // capture only values in the valuesArray as long.
+
+            JsonObject peakvalue = peakvalues.createNestedObject();
+            peakvalue["value"] = getValue(stringToCharArray(output[i + 2]), output[i + 2].size(), '(', '*'); // remove "*kW" from the string
+        }
+
+        // debug
+        // serializeJsonPretty(Last13MonthsPeaks_json, Serial);
+
+        //calculate average peak value.
+        long sum = 0;
+        for (unsigned int i = 0; i < valuesArray.size(); i++)
+            sum += valuesArray[i];
+        long average = sum / valuesArray.size();
+
+        if (count == valuesArray.size())
+            mAverage15mPeakLast13months = average;
+        else
+            mAverage15mPeakLast13months = -1; // detect error value over MQTT.
+
+        /* */
+    }
+
+#pragma endregion
+
     return validCRCFound;
 }
 
 void read_p1_hardwareserial()
 {
+
     if (Serial.available())
     {
         memset(telegram, 0, sizeof(telegram));
 
         while (Serial.available())
         {
-            ESP.wdtDisable();
+            // ESP.wdtDisable();
             int len = Serial.readBytesUntil('\n', telegram, P1_MAXLINELENGTH);
-            ESP.wdtEnable(1);
+
+            // ESP.wdtEnable(1);
+
+            // debug entire telegram
+            // Serial.printf(">>> %s\n", telegram);
 
             processLine(len);
+
+            memset(telegram, 0, sizeof(telegram));
         }
     }
 }
 
-void processLine(int len) {
+void processLine(int len)
+{
     telegram[len] = '\n';
     telegram[len + 1] = 0;
     yield();
 
+    // DEBUG
     bool result = decode_telegram(len + 1);
-    if (result) {
+
+    if (result)
+    {
         send_data_to_broker();
         LAST_UPDATE_SENT = millis();
     }
@@ -480,10 +632,26 @@ void write_eeprom(int offset, int len, String value)
 bool shouldSaveConfig = false;
 
 // * Callback notifying us of the need to save config
-void save_wifi_config_callback ()
+void save_wifi_config_callback()
 {
     Serial.println(F("Should save config"));
     shouldSaveConfig = true;
+}
+
+// ******************************************
+// * Callback for resetting Wifi settings   *
+// ******************************************
+void resetWifi()
+{
+    Serial.println("RST was pushed twice...");
+    Serial.println("Erasing stored WiFi credentials.");
+
+    // clear WiFi creds.
+    WiFiManager wifiManager;
+    wifiManager.resetSettings();
+
+    Serial.println("Restarting...");
+    ESP.restart(); // builtin, safely restarts the ESP.
 }
 
 // **********************************
@@ -573,6 +741,18 @@ void setup()
     // * Set led pin as output
     pinMode(LED_BUILTIN, OUTPUT);
 
+    // * Setup Double reset detection
+    if (drd.detectDoubleReset())
+    {
+        Serial.println("DRD: Double Reset Detected");
+        Serial.println("DRD: RESET WIFI Initiated");
+        resetWifi();
+    }
+    else
+    {
+        Serial.println("DRD: No Double Reset Detected");
+    }
+
     // * Start ticker with 0.5 because we start in AP mode and try to connect
     ticker.attach(0.6, tick);
 
@@ -588,9 +768,9 @@ void setup()
     }
 
     WiFiManagerParameter CUSTOM_MQTT_HOST("host", "MQTT hostname", MQTT_HOST, 64);
-    WiFiManagerParameter CUSTOM_MQTT_PORT("port", "MQTT port",     MQTT_PORT, 6);
-    WiFiManagerParameter CUSTOM_MQTT_USER("user", "MQTT user",     MQTT_USER, 32);
-    WiFiManagerParameter CUSTOM_MQTT_PASS("pass", "MQTT pass",     MQTT_PASS, 32);
+    WiFiManagerParameter CUSTOM_MQTT_PORT("port", "MQTT port", MQTT_PORT, 6);
+    WiFiManagerParameter CUSTOM_MQTT_USER("user", "MQTT user", MQTT_USER, 32);
+    WiFiManagerParameter CUSTOM_MQTT_PASS("pass", "MQTT pass", MQTT_PASS, 32);
 
     // * WiFiManager local initialization. Once its business is done, there is no need to keep it around
     WiFiManager wifiManager;
@@ -630,7 +810,7 @@ void setup()
     strcpy(MQTT_USER, CUSTOM_MQTT_USER.getValue());
     strcpy(MQTT_PASS, CUSTOM_MQTT_PASS.getValue());
 
-    // * Save the custom parameters to FS
+    // * Save the custom parameters to EEPROM
     if (shouldSaveConfig)
     {
         Serial.println(F("Saving WiFiManager config"));
@@ -660,7 +840,6 @@ void setup()
     Serial.printf("MQTT connecting to: %s:%s\n", MQTT_HOST, MQTT_PORT);
 
     mqtt_client.setServer(MQTT_HOST, atoi(MQTT_PORT));
-
 }
 
 // **********************************
@@ -669,11 +848,24 @@ void setup()
 
 void loop()
 {
+    // every 2days --> restart board.
+    const unsigned long RESTART_INTERVAL = 2ul * 24ul * 60ul * 60ul * 1000ul;
+    if (millis() > RESTART_INTERVAL)
+    {
+        Serial.println("++++++++++++++++++++++++++++++++++++++++");
+        Serial.print("trying to restart after 2 days or ms: ");
+        Serial.print(RESTART_INTERVAL);
+        Serial.println("");
+        Serial.println("++++++++++++++++++++++++++++++++++++++++");
+        ESP.restart();
+    }
+
     ArduinoOTA.handle();
     long now = millis();
 
     if (!mqtt_client.connected())
     {
+
         if (now - LAST_RECONNECT_ATTEMPT > 5000)
         {
             LAST_RECONNECT_ATTEMPT = now;
@@ -686,10 +878,24 @@ void loop()
     }
     else
     {
+        // Serial.println("start mqtt Loop");
         mqtt_client.loop();
+        // Serial.println("End mqtt Loop");
     }
-    
-    if (now - LAST_UPDATE_SENT > UPDATE_INTERVAL) {
+
+    if (now - LAST_UPDATE_SENT > UPDATE_INTERVAL)
+    {
+        // Serial.println("start reading serial");
         read_p1_hardwareserial();
     }
+
+    // //debug
+    // Serial.println("End Loop");
+    // Serial.println("--------");
+
+    // Call the double reset detector loop method every so often,
+    // so that it can recognise when the timeout expires.
+    // You can also call drd.stop() when you wish to no longer
+    // consider the next reset as a double reset.
+    drd.loop();
 }
