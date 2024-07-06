@@ -234,10 +234,13 @@ bool decode_telegram(int len)
     int endChar = FindCharInArrayRev(telegram, '!', len);
     bool validCRCFound = false;
 
+    Serial.print("> ");
     for (int cnt = 0; cnt < len; cnt++) {
         Serial.print(telegram[cnt]);
     }
-    Serial.print("\n");
+    if (telegram[len - 1] != '\n') {
+        Serial.print("\n");
+    }
 
     if (startChar >= 0)
     {
@@ -563,11 +566,14 @@ void setup()
     Serial.begin(BAUD_RATE, SERIAL_8N1, SERIAL_FULL);
     Serial.setRxBufferSize(1024);
     Serial.println("");
-    Serial.println("Swapping UART0 RX to inverted");
     Serial.flush();
 
+    #if SERIAL_RX_INVERTED
     // Invert the RX serialport by setting a register value, this way the TX might continue normally allowing the serial monitor to read println's
+    Serial.println("Swapping UART0 RX to inverted");
     USC0(UART0) = USC0(UART0) | BIT(UCRXI);
+    #endif
+
     Serial.println("Serial port is ready to recieve.");
 
     // * Set led pin as output
@@ -586,6 +592,8 @@ void setup()
         read_eeprom(70, 32).toCharArray(MQTT_USER, 32);  // * 70-101
         read_eeprom(102, 32).toCharArray(MQTT_PASS, 32); // * 102-133
     }
+
+    WiFi.hostname(HOSTNAME);
 
     WiFiManagerParameter CUSTOM_MQTT_HOST("host", "MQTT hostname", MQTT_HOST, 64);
     WiFiManagerParameter CUSTOM_MQTT_PORT("port", "MQTT port",     MQTT_PORT, 6);
@@ -689,7 +697,7 @@ void loop()
         mqtt_client.loop();
     }
     
-    if (now - LAST_UPDATE_SENT > UPDATE_INTERVAL) {
+    if (now - LAST_UPDATE_SENT > UPDATE_INTERVAL || LAST_UPDATE_SENT == 0) {
         read_p1_hardwareserial();
     }
 }

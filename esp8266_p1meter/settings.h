@@ -9,6 +9,9 @@
 // * Baud rate for both hardware and software 
 #define BAUD_RATE 115200
 
+// * Change to 0 if you have a hardware inverter
+#define SERIAL_RX_INVERTED 1
+
 // The used serial pins, note that this can only be UART0, as other serial port doesn't support inversion
 // By default the UART0 serial will be used. These settings displayed here just as a reference. 
 // #define SERIAL_RX RX
