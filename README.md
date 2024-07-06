@@ -16,7 +16,7 @@ This setup requires:
 
 Compiling up using Arduino IDE:
 - Ensure you have selected the right board
-- Using the Tools->Manage Libraries... install `PubSubClient` and `WifiManager`
+- Using the Tools->Manage Libraries... install `PubSubClient` and `IotWebConf`
 - Flash the software
 
 Compiling up using PlatformIO:
